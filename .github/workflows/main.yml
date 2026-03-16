@@ -1,20 +1,55 @@
 name: python-deployment
 
-run-name: ${{ github.actor }} - ${{ github.ref_name}} -${{ github.sha }}
+run-name: >-
+  ${{ github.actor }} - ${{ github.event_name }} - ${{ github.ref_name }} -
+  ${{ github.event.inputs.deploy_artifact || 'ubuntu-3.9' }}
 
 on:
   push:
     branches: ["main"]
   pull_request:
     branches: ["main"]
+  workflow_dispatch:
+    inputs:
+      deploy_artifact:
+        required: true
+        default: ubuntu-3.9
+        type: choice
+        options:
+          - ubuntu-3.8
+          - ubuntu-3.9
+          - windows-3.8
+          - windows-3.9
 
 env:
-  PythonVersion: 3.8
-  DockerImageName: todoapp
+  DockerImageName: eldard/todoapp
+  DefaultDeployArtifact: ubuntu-3.9
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  python-ci:
+  prepare:
+    name: Resolve Python Version
     runs-on: ubuntu-latest
+    outputs:
+      deploy_artifact: ${{ steps.selection.outputs.deploy_artifact }}
+    steps:
+      - name: Select Deploy Artifact
+        id: selection
+        shell: bash
+        run: echo "deploy_artifact=${{ github.event.inputs.deploy_artifact || env.DefaultDeployArtifact }}" >> "$GITHUB_OUTPUT"
+
+
+  python-ci:
+    name: Python CI (${{ matrix.os_name }}, Python ${{ matrix.python_version }})
+    runs-on: ${{ matrix.os_name }}
+    needs: prepare
+    strategy:
+      matrix:
+        os_name: [ubuntu-latest, windows-latest]
+        python_version: [3.8, 3.9]
     defaults:
       run:
         working-directory: ./src
@@ -22,10 +57,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python ${{ env.PythonVersion }}
-        uses: actions/setup-python@v4
+      - name: Set up Python ${{ matrix.python_version }}
+        uses: actions/setup-python@v5
         with:
-          python-version: ${{ env.PythonVersion }}
+          python-version: ${{ matrix.python_version }}
 
       - name: Install dependencies
         run: |
@@ -53,8 +88,8 @@ jobs:
       - name: Upload python artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: python-artifacts
-          path: .
+          name: python-artifacts-${{ matrix.os_name }}-${{ matrix.python_version }}
+          path: src
 
       - name: Upload helm artifacts
         if: github.ref_name == 'main'
@@ -74,13 +109,13 @@ jobs:
     name: Build and Push Image
     runs-on: ubuntu-latest
     if: ${{ github.ref_name == 'main' }}
-    needs: python-ci
+    needs: [prepare, python-ci]
     steps:
 
     - uses: actions/download-artifact@v4
       name: Download python artifacts
       with:
-        name: python-artifacts
+        name: python-artifacts-${{ needs.prepare.outputs.deploy_artifact }}
         path: .
 
     - name: Login to Docker Hub
