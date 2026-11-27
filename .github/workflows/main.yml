@@ -35,21 +35,34 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       deploy_artifact: ${{ steps.selection.outputs.deploy_artifact }}
+      python_version: ${{ steps.selection.outputs.python_version }}
+      image_repository: ${{ steps.selection.outputs.image_repository }}
     steps:
       - name: Select Deploy Artifact
         id: selection
         shell: bash
-        run: echo "deploy_artifact=${{ github.event.inputs.deploy_artifact || env.DefaultDeployArtifact }}" >> "$GITHUB_OUTPUT"
+        run: |
+          ARTIFACT="${{ github.event.inputs.deploy_artifact || env.DefaultDeployArtifact }}"
+          echo "deploy_artifact=${ARTIFACT}" >> "$GITHUB_OUTPUT"
+          echo "python_version=${ARTIFACT#*-}" >> "$GITHUB_OUTPUT"
+          echo "image_repository=${{ env.DockerImageName }}" >> "$GITHUB_OUTPUT"
 
 
   python-ci:
-    name: Python CI (${{ matrix.os_name }}, Python ${{ matrix.python_version }})
-    runs-on: ${{ matrix.os_name }}
+    name: Python CI (${{ matrix.os }}, Python ${{ matrix.python_version }})
+    runs-on: ${{ matrix.runner }}
     needs: prepare
     strategy:
+      fail-fast: false
       matrix:
-        os_name: [ubuntu-latest, windows-latest]
-        python_version: [3.8, 3.9]
+        os: [ubuntu, windows]
+        python_version: ["3.8", "3.9"]
+        include:
+          # Python 3.8 is EOL and has no prebuilt binaries for newer Ubuntu images
+          - os: ubuntu
+            runner: ubuntu-22.04
+          - os: windows
+            runner: windows-latest
     defaults:
       run:
         working-directory: ./src
@@ -88,22 +101,9 @@ jobs:
       - name: Upload python artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: python-artifacts-${{ matrix.os_name }}-${{ matrix.python_version }}
+          name: python-artifacts-${{ matrix.os }}-${{ matrix.python_version }}
           path: src
 
-      - name: Upload helm artifacts
-        if: github.ref_name == 'main'
-        uses: actions/upload-artifact@v4
-        with:
-          name: helm-artifacts
-          path: ${{ github.workspace }}/helm-charts
-
-      - name: Upload kind cluster artifact
-        if: github.ref_name == 'main'
-        uses: actions/upload-artifact@v4
-        with:
-          name: kind-cluster
-          path: ${{ github.workspace }}/cluster.yml
 
   docker-ci:
     name: Build and Push Image
@@ -129,19 +129,34 @@ jobs:
       with:
         push: true
         context: ./src
-        tags: ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.DockerImageName }}:${{ github.sha }}
+        build-args: |
+          PYTHON_VERSION=${{ needs.prepare.outputs.python_version }}
+        tags: ${{ needs.prepare.outputs.image_repository }}:${{ github.sha }}
 
   helm-ci:
     runs-on: ubuntu-latest
     needs: python-ci
     if: github.ref_name == 'main'
     name: Helm CI
+    defaults:
+      run:
+        working-directory: ./helm-charts
     steps:
 
-    - uses: actions/download-artifact@v4
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Upload helm artifacts
+      uses: actions/upload-artifact@v4
       with:
         name: helm-artifacts
-        path: .
+        path: helm-charts
+
+    - name: Upload kind cluster artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: kind-cluster
+        path: cluster.yml
 
     - name: Set Up Helm
       uses: azure/setup-helm@v4.2.0
@@ -159,24 +174,28 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: helm-package
-        path: ./*.tgz
+        path: helm-charts/*.tgz
 
   deploy-helm-dev:
     name: Deploy helm to Development
     uses: ./.github/workflows/reusable-deployment.yml
-    needs: [helm-ci, docker-ci]
+    needs: [prepare, helm-ci, docker-ci]
     secrets: inherit
     with:
       environment: development
       version: ${{ github.sha }}
+      image-repository: ${{ needs.prepare.outputs.image_repository }}
+      selected-artifact: ${{ needs.prepare.outputs.deploy_artifact }}
 
   deploy-helm-stg:
     name: Deploy helm to Staging
     uses: ./.github/workflows/reusable-deployment.yml
-    needs: [deploy-helm-dev]
+    needs: [prepare, deploy-helm-dev]
     secrets: inherit
     with:
       environment: staging
       version: ${{ github.sha }}
+      image-repository: ${{ needs.prepare.outputs.image_repository }}
+      selected-artifact: ${{ needs.prepare.outputs.deploy_artifact }}
       helm-values-path: ./todoapp/values/stg.yaml
       helm-release-name: todoapp-staging

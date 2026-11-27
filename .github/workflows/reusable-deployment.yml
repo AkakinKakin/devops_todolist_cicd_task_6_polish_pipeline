@@ -72,7 +72,7 @@ jobs:
           --set todoapp.image.repository=${{ inputs.image-repository }} \
           --set todoapp.image.tag=${{ inputs.version }}
 
-      - name: Deploy helm to Development
+      - name: Deploy helm to ${{ inputs.environment }}
         run: |
           helm upgrade --install --wait --timeout 180s --debug ${{ inputs.helm-release-name }} ./todoapp-*.tgz \
           -f ${{ inputs.helm-values-path }} \
